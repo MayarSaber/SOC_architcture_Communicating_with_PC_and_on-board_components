@@ -1,0 +1,30 @@
+{
+    "python.autoComplete.extraPaths": [
+        "${workspaceFolder}/sources/poky/bitbake/lib",
+        "${workspaceFolder}/sources/poky/meta/lib"
+    ],
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/sources/poky/bitbake/lib",
+        "${workspaceFolder}/sources/poky/meta/lib"
+    ],
+    "files.associations": {
+        "*.slow5": "tsv",
+        "*.vcf": "tsv",
+        "*.fasta": "plaintext",
+        "*.aln": "plaintext",
+        "*.md": "markdown",
+        "*.fastq": "plaintext",
+        "*.fa": "plaintext",
+        "*.pyx": "python",
+        "*.config": "groovy",
+        "*.conf": "bitbake",
+        "*.inc": "bitbake",
+        "usbd_cdc_if.h": "c",
+        "cs43l22.h": "c",
+        "main.h": "c",
+        "lis302dl.h": "c",
+        "stm32f4_discovery.h": "c",
+        "stm32f4_discovery_accelerometer.h": "c",
+        "stm32f4_discovery_audio.h": "c"
+    }
+}

@@ -59,7 +59,8 @@ extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
 extern DMA_HandleTypeDef hdma_spi3_tx;
 extern I2S_HandleTypeDef hi2s3;
 /* USER CODE BEGIN EV */
-
+extern TIM_HandleTypeDef htim10;
+extern TIM_HandleTypeDef htim11;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -243,5 +244,9 @@ void OTG_FS_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+void TIM1_UP_TIM10_IRQHandler(void)
+//This function handles TIM1 update and TIM10 global interrupt.
+{
+  HAL_TIM_IRQHandler(&htim10);
+}
 /* USER CODE END 1 */

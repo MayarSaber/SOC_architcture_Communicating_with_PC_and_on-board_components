@@ -38,6 +38,7 @@ void MX_TIM10_Init(void)
   /* USER CODE BEGIN TIM10_Init 1 */
 
   /* USER CODE END TIM10_Init 1 */
+  //clock = 168MHz
   htim10.Instance = TIM10;
   htim10.Init.Prescaler = 16800;
   htim10.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -64,6 +65,8 @@ void MX_TIM11_Init(void)
   /* USER CODE BEGIN TIM11_Init 1 */
 
   /* USER CODE END TIM11_Init 1 */
+  //clock = 168MHz
+  //configured to have 10msec period
   htim11.Instance = TIM11;
   htim11.Init.Prescaler = 16800;
   htim11.Init.CounterMode = TIM_COUNTERMODE_UP;

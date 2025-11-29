@@ -24,6 +24,7 @@
 #include "spi.h"
 #include "usb_device.h"
 #include "gpio.h"
+#include "tim.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -108,6 +109,8 @@ void SystemClock_Config(void);
 
 // Interrupt handlers
 void handle_new_line();
+void handle_timer10(void);
+void handle_timer11(void);
 
 // Commands
 void go_to_stop();
@@ -156,7 +159,21 @@ int main(void)
   MX_I2S3_Init();
   MX_SPI1_Init();
   MX_USB_DEVICE_Init();
+
   /* USER CODE BEGIN 2 */
+
+  //Initializing user LEDs via BSP
+  BSP_LED_Init(LED3);   //LED3 will be used for BLINK/test LED
+  BSP_LED_Init(LED4);
+  BSP_LED_Init(LED5);
+  BSP_LED_Init(LED6);
+
+  //Timers initializations
+  MX_TIM10_Init();
+  MX_TIM11_Init();
+
+  // Start TIM10 in interrupt mode → drives handle_timer10()
+  HAL_TIM_Base_Start_IT(&htim10);
 
 
   /* USER CODE END 2 */
@@ -170,6 +187,20 @@ int main(void)
     {
       // Go to sleep, waiting for interrupt (WFI).
       HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON,PWR_SLEEPENTRY_WFI);
+    }
+
+    // Handle timer 10 (PWM / blink LED)
+    if (isr_flags & ISR_FLAG_TIM10)
+    {
+      isr_flags &= ~ISR_FLAG_TIM10;
+      handle_timer10();
+    }
+
+    // Handle timer 11 (10 ms tick – accel/button later)
+    if (isr_flags & ISR_FLAG_TIM11)
+    {
+      isr_flags &= ~ISR_FLAG_TIM11;
+      handle_timer11();
     }
 
     // This is needed for the UART transmission 
@@ -347,6 +378,32 @@ void go_to_stop()
   MX_I2S3_Init();
 
   init_codec_and_play();
+}
+
+//The callback function to handel the interrupt from the timers
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM10)
+  {
+    // Timer 10 expired: set flag so main loop can handle it
+    isr_flags |= ISR_FLAG_TIM10;
+  }
+  else if (htim->Instance == TIM11)
+  {
+    // Timer 11 expired: 10 ms tick (we'll use this later)
+    isr_flags |= ISR_FLAG_TIM11;
+  }
+}
+
+void handle_timer10(void)
+{
+  // For now: just toggle LED3 so we can see TIM10 is working
+  BSP_LED_Toggle(LED3);
+}
+
+void handle_timer11(void)
+{
+  // For now: do nothing. Will be used for accelerometer + button timing later.
 }
 
 /* USER CODE END 4 */

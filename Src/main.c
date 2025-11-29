@@ -70,8 +70,29 @@ const uint8_t ISR_FLAG_TIM11 = 0x04;  // Timer 11 Period elapsed
 volatile uint8_t isr_flags = 0;
 
 // Commands that we will receive from the PC
-const uint8_t COMMAND_CHANGE_FREQ[] = "changefreq"; // Change the frequency
-const uint8_t COMMAND_STOP[]        = "stop"; // Go to stop mode
+//The Board will be in sleep mode as much as possible, to reduce power consumption.
+//Additionally, the board can be sent to stop or standby mode by using a command from the PC.
+const uint8_t COMMAND_STOP[] = "stop"; // Put Board in stop mode_To wake up from stop mode, the user can press the user button on the Board.
+const uint8_t COMMAND_STAND_BY[] = "standby"; // Put Board in standby mode_To wake up from standby mode, the user can press the reset button on the Board.
+
+const uint8_t COMMAND_CHANGE_FREQ[] = "changefreq"; // Set the PWM frequency to the next possible value_The freq can have 3 values "fast, medium, slow"
+const uint8_t COMMAND_CHANGE_DUT[] = "changedut"; // Set the PWM duty cycle to the next possible value_The duty cycle can have 3 values, "75%, 50%, 25%"
+const uint8_t COMMAND_PWM_MAN[] = "pwmman"; // Set PWM frequency with user button_press user button for a given amount of time, that will become the new freq
+
+const uint8_t COMMAND_LED_PWM[] = "ledpwm"; // Set the LED BLINK to PWM mode_The LED BLINK changes according to the PWM signal generated internally
+const uint8_t COMMAND_LED_MAN[] = "ledman"; // Set the LED BLINK to manual mode_In manual mode the LED BLINK can be turned ON and OFF with commands from the PC,and toggled with the user button
+const uint8_t COMMAND_LED_ON[] = "ledon"; // Turn ON the LED BLINK
+const uint8_t COMMAND_LED_OFF[] = "ledoff"; // Turn OFF the LED BLINK
+
+//The remaining 3 LEDs will be used to indicate the readings from the accelerometer
+//The accelerometer will be read every 10ms. Another timer configured to generate interrupts should be used
+const uint8_t COMMAND_ACC_ON[] = "accon"; // Enable accelerometer readings_If the accelerometer is enabled, after each reading one of the 3 LED ACCELEROMETERS is
+                                          //turned ON, and the rest are turned OFF, according to which direction (X, Y, Z) as the highest accelerometer value, in absolute value.
+const uint8_t COMMAND_ACC_OFF[] = "accoff"; // Disable accelerometer readings_If the accelerometer is disabled, the timer should be stopped and all LEDs turned OFF.
+
+const uint8_t COMMAND_MUTE[] = "mute"; // Mute audible signal
+const uint8_t COMMAND_UNMUTE[] = "unmute"; // Un-mute audible signal
+
 
 // Buffer for command
 static uint8_t line_ready_buffer[LINE_BUFFER_SIZE]; // Stable buffer for main
@@ -160,6 +181,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
   }
   /* USER CODE END 3 */
 }
@@ -263,12 +285,12 @@ void CDC_ReceiveCallBack(uint8_t *buf, uint32_t len)
 */
 void handle_new_line()
 {
-  if (memcmp(line_ready_buffer, COMMAND_CHANGE_FREQ, sizeof(COMMAND_CHANGE_FREQ)) == 0)
+  /*if (memcmp(line_ready_buffer, COMMAND_CHANGE_FREQ, sizeof(COMMAND_CHANGE_FREQ)) == 0)
   {
     change_freq();
-  }
+  }*/
 
-  else if (memcmp(line_ready_buffer, COMMAND_STOP, sizeof(COMMAND_STOP)) == 0)
+  if (memcmp(line_ready_buffer, COMMAND_STOP, sizeof(COMMAND_STOP)) == 0)
   {
     go_to_stop();
   }
@@ -286,6 +308,9 @@ void init_codec_and_play()
   // sine signal
   for(int i = 0; i < AUDIO_BUFFER_LENGTH;i++)
   {
+    //for sampling the sine wave at discrete instances, we use the equaltion 
+    //x(n)=A.sin(2.pi.f.(n/Fs)), where n = 0,1,2,...
+    //AUDIO_BUFFER_LENGTH, the number of samples in one full period of sine
     buffer_audio[2 * i] = 10000 * sin(2 * 3.14 * SLOW_SIN_FREQ * i / SAMPLING_RATE);
     buffer_audio[2 * i + 1] = 10000 * sin(2 * 3.14 * SLOW_SIN_FREQ * i / SAMPLING_RATE);
   }

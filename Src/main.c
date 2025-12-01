@@ -38,7 +38,11 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+// LED roles
+#define LED_BLINK LED3
+#define LED_ACC_X LED4
+#define LED_ACC_Y LED5
+#define LED_ACC_Z LED6
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -62,6 +66,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
 const uint8_t ISR_FLAG_RX    = 0x01;  // Received data
 const uint8_t ISR_FLAG_TIM10 = 0x02;  // Timer 10 Period elapsed
 const uint8_t ISR_FLAG_TIM11 = 0x04;  // Timer 11 Period elapsed
@@ -101,6 +106,44 @@ static uint8_t line_ready_buffer[LINE_BUFFER_SIZE]; // Stable buffer for main
 // Audio buffer
 int16_t buffer_audio[2 * AUDIO_BUFFER_LENGTH];
 
+
+// ---------- LED BLINK PWM state ----------
+// 3 possible PWM frequencies (slow/medium/fast) expressed as total TIM10 ticks
+// TIM10: PSC = 16800, so timer runs at 10 kHz -> 1 tick = 0.1 ms
+// total_ticks * 0.1 ms = period
+#define PWM_NUM_FREQ 3
+#define PWM_NUM_DUTY 3
+
+typedef enum {
+  PWM_FREQ_SLOW = 0,   // 1.0 s period  (10000 * 0.1 ms)
+  PWM_FREQ_MEDIUM,     // 0.5 s period  ( 5000 * 0.1 ms)
+  PWM_FREQ_FAST        // 0.2 s period  ( 2000 * 0.1 ms)
+} pwm_freq_t;
+
+typedef enum {
+  PWM_DUTY_25 = 0,     // 25 %
+  PWM_DUTY_50,         // 50 %
+  PWM_DUTY_75          // 75 %
+} pwm_duty_t;
+
+// Total ticks per PWM period for each speed
+static const uint32_t pwm_total_ticks[PWM_NUM_FREQ]   = {10000, 5000, 2000};
+// Duty cycles in percent
+static const uint8_t  pwm_duty_percent[PWM_NUM_DUTY]  = {25, 50, 75};
+
+// Current configuration
+static volatile pwm_freq_t current_pwm_freq  = PWM_FREQ_SLOW;
+static volatile pwm_duty_t current_pwm_duty  = PWM_DUTY_50;
+
+// Are we in PWM mode or manual mode?
+static volatile uint8_t led_pwm_mode = 1;   // 1 = PWM mode, 0 = manual
+static volatile uint8_t led_manual_state = 0; // 0 = off, 1 = on
+
+// Internal counters derived from freq + duty
+static uint32_t pwm_on_ticks  = 0;
+static uint32_t pwm_off_ticks = 0;
+static uint8_t  pwm_led_is_on = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -112,8 +155,18 @@ void handle_new_line();
 void handle_timer10(void);
 void handle_timer11(void);
 
+// PWM functions
+static void pwm_update_intervals(void);
+static void pwm_apply_settings(void);
+
 // Commands
 void go_to_stop();
+void change_freq(void);
+void change_duty(void);
+void cmd_led_pwm(void);
+void cmd_led_man(void);
+void cmd_led_on(void);
+void cmd_led_off(void);
 
 // Helper functions
 void init_codec_and_play();
@@ -163,17 +216,26 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   //Initializing user LEDs via BSP
-  BSP_LED_Init(LED3);   //LED3 will be used for BLINK/test LED
-  BSP_LED_Init(LED4);
-  BSP_LED_Init(LED5);
-  BSP_LED_Init(LED6);
+  BSP_LED_Init(LED_BLINK);
+  BSP_LED_Init(LED_ACC_X);
+  BSP_LED_Init(LED_ACC_Y);
+  BSP_LED_Init(LED_ACC_Z);
+
+  //Initializing user button
+  BSP_PB_Init(BUTTON_KEY, BUTTON_MODE_EXTI); 
 
   //Timers initializations
   MX_TIM10_Init();
   MX_TIM11_Init();
 
+  // Start with PWM mode active
+  led_pwm_mode = 1;
+  current_pwm_freq = PWM_FREQ_SLOW;
+  current_pwm_duty = PWM_DUTY_50;
+
   // Start TIM10 in interrupt mode → drives handle_timer10()
   HAL_TIM_Base_Start_IT(&htim10);
+  pwm_apply_settings();
 
 
   /* USER CODE END 2 */
@@ -325,7 +387,60 @@ void handle_new_line()
   {
     go_to_stop();
   }
-
+  else if (memcmp(line_ready_buffer, COMMAND_STAND_BY, sizeof(COMMAND_STAND_BY)) == 0)
+  {
+    //To be done
+    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17);
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_CHANGE_FREQ, sizeof(COMMAND_CHANGE_FREQ)) == 0)
+  {
+    change_freq();
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_CHANGE_DUT, sizeof(COMMAND_CHANGE_DUT)) == 0)
+  {
+    change_duty();
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_PWM_MAN, sizeof(COMMAND_PWM_MAN)) == 0)
+  {
+    //To be done
+    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17);
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_LED_PWM, sizeof(COMMAND_LED_PWM)) == 0)
+  {
+    cmd_led_pwm();
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_LED_MAN, sizeof(COMMAND_LED_MAN)) == 0)
+  {
+    cmd_led_man();
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_LED_ON, sizeof(COMMAND_LED_ON)) == 0)
+  {
+    cmd_led_on();
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_LED_OFF, sizeof(COMMAND_LED_OFF)) == 0)
+  {
+    cmd_led_off();
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_ACC_ON, sizeof(COMMAND_ACC_ON)) == 0)
+  {
+    //To be done
+    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17);
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_ACC_OFF, sizeof(COMMAND_ACC_OFF)) == 0)
+  {
+    //To be done
+    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17); 
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_MUTE, sizeof(COMMAND_MUTE)) == 0)
+  {
+    //To be done
+    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17);
+  }
+  else if (memcmp(line_ready_buffer, COMMAND_UNMUTE, sizeof(COMMAND_UNMUTE)) == 0)
+  {
+    //To be done
+    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17); 
+  }
   else
   {
     // If we receive an unknown command, we send an error message back to the PC
@@ -380,6 +495,93 @@ void go_to_stop()
   init_codec_and_play();
 }
 
+void change_freq(void)
+{
+  // Cycle SLOW -> MEDIUM -> FAST -> SLOW
+  if (current_pwm_freq == PWM_FREQ_SLOW)
+  {
+    current_pwm_freq = PWM_FREQ_MEDIUM;
+    CDC_Transmit_FS((uint8_t*)"Freq: medium\r\n", 14);
+  }
+  else if (current_pwm_freq == PWM_FREQ_MEDIUM)
+  {
+    current_pwm_freq = PWM_FREQ_FAST;
+    CDC_Transmit_FS((uint8_t*)"Freq: fast\r\n", 12);
+  }
+  else
+  {
+    current_pwm_freq = PWM_FREQ_SLOW;
+    CDC_Transmit_FS((uint8_t*)"Freq: slow\r\n", 12);
+  }
+
+  // Re-apply PWM settings (update ON/OFF ticks for TIM10)
+  pwm_apply_settings();
+}
+
+void change_duty(void)
+{
+  // Cycle 25% -> 50% -> 75% -> 25%
+  if (current_pwm_duty == PWM_DUTY_25)
+  {
+    current_pwm_duty = PWM_DUTY_50;
+    CDC_Transmit_FS((uint8_t*)"Duty: 50%\r\n", 11);
+  }
+  else if (current_pwm_duty == PWM_DUTY_50)
+  {
+    current_pwm_duty = PWM_DUTY_75;
+    CDC_Transmit_FS((uint8_t*)"Duty: 75%\r\n", 11);
+  }
+  else
+  {
+    current_pwm_duty = PWM_DUTY_25;
+    CDC_Transmit_FS((uint8_t*)"Duty: 25%\r\n", 11);
+  }
+
+  pwm_apply_settings();
+}
+
+void cmd_led_pwm(void)
+{
+  led_pwm_mode = 1;          // LED follows PWM
+  // Restart PWM engine so it takes control immediately
+  pwm_apply_settings();
+
+  CDC_Transmit_FS((uint8_t*)"LED mode: PWM\r\n", 15);
+}
+
+void cmd_led_man(void)
+{
+  led_pwm_mode = 0;          // Manual control
+
+  // Apply manual state to LED immediately
+  if (led_manual_state)
+    BSP_LED_On(LED_BLINK);
+  else
+    BSP_LED_Off(LED_BLINK);
+
+  CDC_Transmit_FS((uint8_t*)"LED mode: MANUAL\r\n", 18);
+}
+
+void cmd_led_on(void)
+{
+  led_manual_state = 1;
+  if (!led_pwm_mode)
+  {
+    BSP_LED_On(LED_BLINK);
+  }
+  CDC_Transmit_FS((uint8_t*)"LED: ON\r\n", 9);
+}
+
+void cmd_led_off(void)
+{
+  led_manual_state = 0;
+  if (!led_pwm_mode)
+  {
+    BSP_LED_Off(LED_BLINK);
+  }
+  CDC_Transmit_FS((uint8_t*)"LED: OFF\r\n", 10);
+}
+
 //The callback function to handel the interrupt from the timers
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
@@ -397,13 +599,68 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 void handle_timer10(void)
 {
-  // For now: just toggle LED3 so we can see TIM10 is working
-  BSP_LED_Toggle(LED3);
+  if (led_pwm_mode)
+  {
+    // PWM mode: alternate ON interval and OFF interval
+    if (pwm_led_is_on)
+    {
+      // LED currently ON -> turn it OFF and schedule OFF time
+      BSP_LED_Off(LED_BLINK);
+      pwm_led_is_on = 0;
+      __HAL_TIM_SET_AUTORELOAD(&htim10, pwm_off_ticks);
+    }
+    else
+    {
+      // LED currently OFF -> turn it ON and schedule ON time
+      BSP_LED_On(LED_BLINK);
+      pwm_led_is_on = 1;
+      __HAL_TIM_SET_AUTORELOAD(&htim10, pwm_on_ticks);
+    }
+
+    // Reset counter each time so the new ARR is effective from 0
+    __HAL_TIM_SET_COUNTER(&htim10, 0);
+  }
+  else
+  {
+    // Manual mode: for now do nothing on TIM10 interrupts.
+    // Later we can even stop TIM10 completely when in manual mode.
+  }
 }
 
 void handle_timer11(void)
 {
   // For now: do nothing. Will be used for accelerometer + button timing later.
+}
+
+// Recompute ON/OFF durations in timer ticks based on current freq & duty
+static void pwm_update_intervals(void)
+{
+  uint32_t total = pwm_total_ticks[current_pwm_freq];
+  uint32_t duty  = pwm_duty_percent[current_pwm_duty];
+
+  pwm_on_ticks  = (total * duty) / 100;
+  pwm_off_ticks = total - pwm_on_ticks;
+
+  // Avoid zero-length phases (just in case)
+  if (pwm_on_ticks == 0)  pwm_on_ticks  = 1;
+  if (pwm_off_ticks == 0) pwm_off_ticks = 1;
+}
+
+// Apply current PWM settings to TIM10 and LED state
+static void pwm_apply_settings(void)
+{
+  // We restart from LED OFF, and let the first interrupt turn it ON
+  pwm_led_is_on = 0;
+  BSP_LED_Off(LED_BLINK);
+
+  pwm_update_intervals();
+
+  // First interval: OFF time, so next interrupt will switch it ON
+  __HAL_TIM_SET_AUTORELOAD(&htim10, pwm_off_ticks);
+  __HAL_TIM_SET_COUNTER(&htim10, 0);
+
+  // Make sure timer is running
+  HAL_TIM_Base_Start_IT(&htim10);
 }
 
 /* USER CODE END 4 */

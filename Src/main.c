@@ -144,6 +144,17 @@ static uint32_t pwm_on_ticks  = 0;
 static uint32_t pwm_off_ticks = 0;
 static uint8_t  pwm_led_is_on = 0;
 
+// --------- pwmman / button timing state ---------
+// after the user sends "pwmman" command
+static volatile uint8_t pwmman_armed = 0;
+// while we are currently timing a press
+static volatile uint8_t pwmman_measuring = 0;
+// when a measurement just finished (main loop will handle it)
+static volatile uint8_t pwmman_done = 0;
+// counts how many 10 ms ticks the button has been held
+static volatile uint32_t button_ticks_10ms = 0;
+// last measured duration in ms (for printing / mapping in main)
+static volatile uint32_t pwmman_last_duration_ms = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -171,6 +182,7 @@ void cmd_led_off(void);
 // Helper functions
 void init_codec_and_play();
 
+void cmd_pwmman(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -271,6 +283,41 @@ int main(void)
       isr_flags &= ~ISR_FLAG_RX;
       handle_new_line();
     }
+
+    if (pwmman_done)
+    {
+    pwmman_done  = 0;
+    pwmman_armed = 0;   // done with this pwmman round
+
+    uint32_t duration_ms = pwmman_last_duration_ms;
+
+    // Map duration -> PWM frequency
+    pwm_freq_t new_freq;
+    if (duration_ms < 400)
+    {
+      new_freq = PWM_FREQ_FAST;
+      CDC_Transmit_FS((uint8_t*)"pwmman: FAST freq\r\n", 19);
+    }
+    else if (duration_ms < 1000)
+    {
+      new_freq = PWM_FREQ_MEDIUM;
+      CDC_Transmit_FS((uint8_t*)"pwmman: MEDIUM freq\r\n", 21);
+    }
+    else
+    {
+      new_freq = PWM_FREQ_SLOW;
+      CDC_Transmit_FS((uint8_t*)"pwmman: SLOW freq\r\n", 19);
+    }
+
+    current_pwm_freq = new_freq;
+    pwm_apply_settings();  // recompute ON/OFF ticks, restart PWM
+
+    // Print measured time
+    char msg[40];
+    int len = snprintf(msg, sizeof(msg),"press = %lu ms\r\n", (unsigned long)duration_ms);
+    CDC_Transmit_FS((uint8_t*)msg, len);
+    }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -402,8 +449,7 @@ void handle_new_line()
   }
   else if (memcmp(line_ready_buffer, COMMAND_PWM_MAN, sizeof(COMMAND_PWM_MAN)) == 0)
   {
-    //To be done
-    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17);
+  cmd_pwmman();
   }
   else if (memcmp(line_ready_buffer, COMMAND_LED_PWM, sizeof(COMMAND_LED_PWM)) == 0)
   {
@@ -592,7 +638,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
   else if (htim->Instance == TIM11)
   {
-    // Timer 11 expired: 10 ms tick (we'll use this later)
+    // Timer 11 expired: 10 ms tick
     isr_flags |= ISR_FLAG_TIM11;
   }
 }
@@ -629,7 +675,30 @@ void handle_timer10(void)
 
 void handle_timer11(void)
 {
-  // For now: do nothing. Will be used for accelerometer + button timing later.
+  // If we are timing a pwmman button press
+  if (pwmman_measuring)
+  {
+    // Check if button is still pressed
+    GPIO_PinState state = HAL_GPIO_ReadPin(KEY_BUTTON_GPIO_PORT, KEY_BUTTON_PIN);
+
+    if (state == GPIO_PIN_SET)
+    {
+      // Still pressed -> add 10 ms
+      button_ticks_10ms++;
+    }
+    else
+    {
+      // Released -> stop timing
+      pwmman_measuring = 0;
+      HAL_TIM_Base_Stop_IT(&htim11);
+
+      uint32_t duration_ms = button_ticks_10ms * 10;  // 10 ms per tick
+      pwmman_last_duration_ms = duration_ms;
+      pwmman_done = 1;  // main loop will finish the job
+    }
+  }
+
+  // Later we'll also put accelerometer logic here (accon/accoff)
 }
 
 // Recompute ON/OFF durations in timer ticks based on current freq & duty
@@ -661,6 +730,42 @@ static void pwm_apply_settings(void)
 
   // Make sure timer is running
   HAL_TIM_Base_Start_IT(&htim10);
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == KEY_BUTTON_PIN)
+  {
+    //For verifying
+    BSP_LED_Toggle(LED4);
+    // Check if button is actually pressed (line high)
+    GPIO_PinState state = HAL_GPIO_ReadPin(KEY_BUTTON_GPIO_PORT, KEY_BUTTON_PIN);
+
+    // We only care about the NEW press, and only if pwmman was armed
+    if (state == GPIO_PIN_SET && pwmman_armed && !pwmman_measuring)
+    {
+      pwmman_measuring  = 1;
+      button_ticks_10ms = 0;
+
+      // Start TIM11 as 10 ms tick, but DO NOT print here
+      __HAL_TIM_SET_COUNTER(&htim11, 0);
+      HAL_TIM_Base_Start_IT(&htim11);
+    }
+
+    // We don't handle release here, we detect it in handle_timer11()
+  }
+}
+
+void cmd_pwmman(void)
+{
+  // Arm manual PWM measurement.
+  pwmman_armed           = 1;
+  pwmman_measuring       = 0;
+  pwmman_done            = 0;
+  button_ticks_10ms      = 0;
+  pwmman_last_duration_ms = 0;
+
+  CDC_Transmit_FS((uint8_t*)"pwmman: ready. Press and hold USER button.\r\n",44);
 }
 
 /* USER CODE END 4 */

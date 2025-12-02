@@ -20,6 +20,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f4xx_it.h"
+#include "stm32f4_discovery.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -249,4 +250,21 @@ void TIM1_UP_TIM10_IRQHandler(void)
 {
   HAL_TIM_IRQHandler(&htim10);
 }
+
+void TIM1_TRG_COM_TIM11_IRQHandler(void)
+{
+  HAL_TIM_IRQHandler(&htim11);
+}
+
 /* USER CODE END 1 */
+
+void EXTI0_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI0_IRQn 0 */
+
+  /* USER CODE END EXTI0_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(KEY_BUTTON_PIN);  // KEY_BUTTON_PIN from stm32f4_discovery.h
+  /* USER CODE BEGIN EXTI0_IRQn 1 */
+
+  /* USER CODE END EXTI0_IRQn 1 */
+}

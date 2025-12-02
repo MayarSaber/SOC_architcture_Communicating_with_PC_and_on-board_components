@@ -76,9 +76,12 @@ const uint8_t ISR_FLAG_TIM11 = 0x04;  // Timer 11 Period elapsed
 // It has to be declared volatile to prevent the compiler from optimizing it out.
 volatile uint8_t isr_flags = 0;
 
-// Commands that we will receive from the PC
-//The Board will be in sleep mode as much as possible, to reduce power consumption.
-//Additionally, the board can be sent to stop or standby mode by using a command from the PC.
+//---Commands---//
+
+/*Commands that we will receive from the PC
+The Board will be in sleep mode as much as possible, to reduce power consumption.
+Additionally, the board can be sent to stop or standby mode by using a command from the PC.*/
+
 const uint8_t COMMAND_STOP[] = "stop"; // Put Board in stop mode_To wake up from stop mode, the user can press the user button on the Board.
 const uint8_t COMMAND_STAND_BY[] = "standby"; // Put Board in standby mode_To wake up from standby mode, the user can press the reset button on the Board.
 
@@ -103,7 +106,6 @@ const uint8_t COMMAND_UNMUTE[] = "unmute"; // Un-mute audible signal
 
 // Buffer for command
 static uint8_t line_ready_buffer[LINE_BUFFER_SIZE]; // Stable buffer for main
-
 // Audio buffer
 int16_t buffer_audio[2 * AUDIO_BUFFER_LENGTH];
 
@@ -176,7 +178,9 @@ void handle_new_line();
 void handle_timer10(void);
 void handle_timer11(void);
 
-// PWM functions
+// Helper functions
+void init_codec_and_play();
+static void build_sine_buffer(uint32_t freq_hz);
 static void pwm_update_intervals(void);
 static void pwm_apply_settings(void);
 
@@ -194,9 +198,6 @@ void cmd_mute(void);
 void cmd_unmute(void);
 void cmd_pwmman(void);
 
-// Helper functions
-void init_codec_and_play();
-static void build_sine_buffer(uint32_t freq_hz);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -250,7 +251,7 @@ int main(void)
   //Initializing user button
   BSP_PB_Init(BUTTON_KEY, BUTTON_MODE_EXTI); 
 
-  //Timers initializations
+  //Initializing timers
   MX_TIM10_Init();
   MX_TIM11_Init();
 
@@ -341,13 +342,6 @@ int main(void)
     current_pwm_freq = new_freq;
     pwm_apply_settings();  // recompute ON/OFF ticks, restart PWM
     build_sine_buffer(SineFreq);
-
-    // Print measured time
-    /*
-    char msg[40];
-    int len = snprintf(msg, sizeof(msg),"press = %lu ms\r\n", (unsigned long)duration_ms);
-    CDC_Transmit_FS((uint8_t*)msg, len);
-    */
     }
 
     /* USER CODE END WHILE */
@@ -405,9 +399,11 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+//------------------------------------------callback functions------------------------------------------
 // All of this is used to manage commands from serial interface
 static uint8_t line_buffer[LINE_BUFFER_SIZE];
 static uint32_t line_len = 0;
+
 void CDC_ReceiveCallBack(uint8_t *buf, uint32_t len)
 {
   // Prevent overflow, does not handle the command
@@ -451,6 +447,47 @@ void CDC_ReceiveCallBack(uint8_t *buf, uint32_t len)
   }
 }
 
+
+//The callback function to handel the interrupt from the timers
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM10)
+  {
+    // Timer 10 expired: set flag so main loop can handle it
+    isr_flags |= ISR_FLAG_TIM10;
+  }
+  else if (htim->Instance == TIM11)
+  {
+    // Timer 11 expired: 10 ms tick
+    isr_flags |= ISR_FLAG_TIM11;
+  }
+}
+
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == KEY_BUTTON_PIN)
+  {
+    // Check if button is actually pressed (line high)
+    GPIO_PinState state = HAL_GPIO_ReadPin(KEY_BUTTON_GPIO_PORT, KEY_BUTTON_PIN);
+
+    // We only care about the NEW press, and only if pwmman was armed
+    if (state == GPIO_PIN_SET && pwmman_armed && !pwmman_measuring)
+    {
+      pwmman_measuring  = 1;
+      button_ticks_10ms = 0;
+
+      // Start TIM11 as 10 ms tick, but DO NOT print here
+      __HAL_TIM_SET_COUNTER(&htim11, 0);
+      HAL_TIM_Base_Start_IT(&htim11);
+    }
+
+    // We don't handle release here, we detect it in handle_timer11()
+  }
+}
+
+
+//------------------------------------------handler functions------------------------------------------
 /**
 * @brief  Handle possible new command
 * @retval None
@@ -517,174 +554,6 @@ void handle_new_line()
   }
 }
 
-static void build_sine_buffer(uint32_t freq_hz)
-{
-  for (int i = 0; i < AUDIO_BUFFER_LENGTH; i++)
-  {
-    // x[n] = A * sin(2*pi*f*n/Fs)
-    float sample_f =
-        10000.0f * sinf(2.0f * 3.14159265f * (float)freq_hz * (float)i / (float)SAMPLING_RATE);
-
-    int16_t sample = (int16_t)sample_f;
-
-    buffer_audio[2 * i]     = sample; // Left
-    buffer_audio[2 * i + 1] = sample; // Right
-  }
-}
-
-void init_codec_and_play()
-{
-  cs43l22_init();
-  // sine signal
-  for(int i = 0; i < AUDIO_BUFFER_LENGTH;i++)
-  {
-    //for sampling the sine wave at discrete instances, we use the equaltion 
-    //x(n)=A.sin(2.pi.f.(n/Fs)), where n = 0,1,2,...
-    //AUDIO_BUFFER_LENGTH, the number of samples in one full period of sine
-    buffer_audio[2 * i] = 10000 * sin(2 * 3.14 * SLOW_SIN_FREQ * i / SAMPLING_RATE);
-    buffer_audio[2 * i + 1] = 10000 * sin(2 * 3.14 * SLOW_SIN_FREQ * i / SAMPLING_RATE);
-  }
-  cs43l22_play(buffer_audio, 2 * AUDIO_BUFFER_LENGTH);
-}
-
-/**
-* @brief Go to stop mode
-* @retval None
-*/
-void go_to_stop()
-{
-  // TODO: Make sure all user LEDS are off
-  // To avoid noise during stop mode
-  cs43l22_stop();
-
-  // Required otherwise the audio wont work after wakeup
-  HAL_I2S_DeInit(&hi2s3);
-
-  // We disable the systick interrupt before going to stop (1ms tick)
-  // Otherwise we would be woken up every 1ms
-  HAL_SuspendTick();
-
-  HAL_PWR_EnterSTOPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
-
-  // We need to reconfigure the system clock after waking up.
-  // After exiting from stop mode, the system clock is reset to the default
-  // which is not the same we configure in cubeMx, so we do it as done
-  // during the init, by calling SystemClock_Config().
-  SystemClock_Config();
-  HAL_ResumeTick();
-
-  // Required otherwise the audio wont work after wakeup
-  MX_I2S3_Init();
-
-  init_codec_and_play();
-}
-
-void change_freq(void)
-{
-  // Cycle SLOW -> MEDIUM -> FAST -> SLOW
-  if (current_pwm_freq == PWM_FREQ_SLOW)
-  {
-    current_pwm_freq = PWM_FREQ_MEDIUM;
-    SineFreq = MEDIUM_SIN_FREQ;
-    CDC_Transmit_FS((uint8_t*)"Freq: medium\r\n", 14);
-  }
-  else if (current_pwm_freq == PWM_FREQ_MEDIUM)
-  {
-    current_pwm_freq = PWM_FREQ_FAST;
-    SineFreq = FAST_SIN_FREQ;
-    CDC_Transmit_FS((uint8_t*)"Freq: fast\r\n", 12);
-  }
-  else
-  {
-    current_pwm_freq = PWM_FREQ_SLOW;
-    SineFreq = SLOW_SIN_FREQ;
-
-    CDC_Transmit_FS((uint8_t*)"Freq: slow\r\n", 12);
-  }
-
-  // Re-apply PWM settings (update ON/OFF ticks for TIM10)
-  pwm_apply_settings();
-  build_sine_buffer(SineFreq);
-}
-
-void change_duty(void)
-{
-  // Cycle 25% -> 50% -> 75% -> 25%
-  if (current_pwm_duty == PWM_DUTY_25)
-  {
-    current_pwm_duty = PWM_DUTY_50;
-    CDC_Transmit_FS((uint8_t*)"Duty: 50%\r\n", 11);
-  }
-  else if (current_pwm_duty == PWM_DUTY_50)
-  {
-    current_pwm_duty = PWM_DUTY_75;
-    CDC_Transmit_FS((uint8_t*)"Duty: 75%\r\n", 11);
-  }
-  else
-  {
-    current_pwm_duty = PWM_DUTY_25;
-    CDC_Transmit_FS((uint8_t*)"Duty: 25%\r\n", 11);
-  }
-
-  pwm_apply_settings();
-}
-
-void cmd_led_pwm(void)
-{
-  led_pwm_mode = 1;          // LED follows PWM
-  // Restart PWM engine so it takes control immediately
-  pwm_apply_settings();
-
-  CDC_Transmit_FS((uint8_t*)"LED mode: PWM\r\n", 15);
-}
-
-void cmd_led_man(void)
-{
-  led_pwm_mode = 0;          // Manual control
-
-  // Apply manual state to LED immediately
-  if (led_manual_state)
-    BSP_LED_On(LED_BLINK);
-  else
-    BSP_LED_Off(LED_BLINK);
-
-  CDC_Transmit_FS((uint8_t*)"LED mode: MANUAL\r\n", 18);
-}
-
-void cmd_led_on(void)
-{
-  led_manual_state = 1;
-  if (!led_pwm_mode)
-  {
-    BSP_LED_On(LED_BLINK);
-  }
-  CDC_Transmit_FS((uint8_t*)"LED: ON\r\n", 9);
-}
-
-void cmd_led_off(void)
-{
-  led_manual_state = 0;
-  if (!led_pwm_mode)
-  {
-    BSP_LED_Off(LED_BLINK);
-  }
-  CDC_Transmit_FS((uint8_t*)"LED: OFF\r\n", 10);
-}
-
-//The callback function to handel the interrupt from the timers
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-  if (htim->Instance == TIM10)
-  {
-    // Timer 10 expired: set flag so main loop can handle it
-    isr_flags |= ISR_FLAG_TIM10;
-  }
-  else if (htim->Instance == TIM11)
-  {
-    // Timer 11 expired: 10 ms tick
-    isr_flags |= ISR_FLAG_TIM11;
-  }
-}
 
 void handle_timer10(void)
 {
@@ -716,6 +585,7 @@ void handle_timer10(void)
   }
 }
 
+
 void handle_timer11(void)
 {
   // If we are timing a pwmman button press
@@ -744,8 +614,7 @@ void handle_timer11(void)
       pwmman_done = 1;  // main loop will finish the job
     }
   }
-
-  // -------- Accelerometer reading --------
+  // ---- Accelerometer reading ----
   if (accel_enabled)
   {
     // Read X, Y, Z into accel_xyz[]
@@ -793,6 +662,40 @@ void handle_timer11(void)
   }
 }
 
+
+//------------------------------------------helper functions------------------------------------------
+static void build_sine_buffer(uint32_t freq_hz)
+{
+  for (int i = 0; i < AUDIO_BUFFER_LENGTH; i++)
+  {
+    // x[n] = A * sin(2*pi*f*n/Fs)
+    float sample_f =
+        10000.0f * sinf(2.0f * 3.14159265f * (float)freq_hz * (float)i / (float)SAMPLING_RATE);
+
+    int16_t sample = (int16_t)sample_f;
+
+    buffer_audio[2 * i]     = sample; // Left
+    buffer_audio[2 * i + 1] = sample; // Right
+  }
+}
+
+
+void init_codec_and_play()
+{
+  cs43l22_init();
+  // sine signal
+  for(int i = 0; i < AUDIO_BUFFER_LENGTH;i++)
+  {
+    //for sampling the sine wave at discrete instances, we use the equaltion 
+    //x(n)=A.sin(2.pi.f.(n/Fs)), where n = 0,1,2,...
+    //AUDIO_BUFFER_LENGTH, the number of samples in one full period of sine
+    buffer_audio[2 * i] = 10000 * sin(2 * 3.14 * SLOW_SIN_FREQ * i / SAMPLING_RATE);
+    buffer_audio[2 * i + 1] = 10000 * sin(2 * 3.14 * SLOW_SIN_FREQ * i / SAMPLING_RATE);
+  }
+  cs43l22_play(buffer_audio, 2 * AUDIO_BUFFER_LENGTH);
+}
+
+
 // Recompute ON/OFF durations in timer ticks based on current freq & duty
 static void pwm_update_intervals(void)
 {
@@ -806,6 +709,7 @@ static void pwm_update_intervals(void)
   if (pwm_on_ticks == 0)  pwm_on_ticks  = 1;
   if (pwm_off_ticks == 0) pwm_off_ticks = 1;
 }
+
 
 // Apply current PWM settings to TIM10 and LED state
 static void pwm_apply_settings(void)
@@ -824,28 +728,99 @@ static void pwm_apply_settings(void)
   HAL_TIM_Base_Start_IT(&htim10);
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+
+//------------------------------------------Commands------------------------------------------
+//---Command1_stop---
+//-------------------
+/**
+* @brief Go to stop mode
+* @retval None
+*/
+void go_to_stop()
 {
-  if (GPIO_Pin == KEY_BUTTON_PIN)
-  {
-    // Check if button is actually pressed (line high)
-    GPIO_PinState state = HAL_GPIO_ReadPin(KEY_BUTTON_GPIO_PORT, KEY_BUTTON_PIN);
+  // TODO: Make sure all user LEDS are off
+  // To avoid noise during stop mode
+  cs43l22_stop();
 
-    // We only care about the NEW press, and only if pwmman was armed
-    if (state == GPIO_PIN_SET && pwmman_armed && !pwmman_measuring)
-    {
-      pwmman_measuring  = 1;
-      button_ticks_10ms = 0;
+  // Required otherwise the audio wont work after wakeup
+  HAL_I2S_DeInit(&hi2s3);
 
-      // Start TIM11 as 10 ms tick, but DO NOT print here
-      __HAL_TIM_SET_COUNTER(&htim11, 0);
-      HAL_TIM_Base_Start_IT(&htim11);
-    }
+  // We disable the systick interrupt before going to stop (1ms tick)
+  // Otherwise we would be woken up every 1ms
+  HAL_SuspendTick();
 
-    // We don't handle release here, we detect it in handle_timer11()
-  }
+  HAL_PWR_EnterSTOPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+
+  // We need to reconfigure the system clock after waking up.
+  // After exiting from stop mode, the system clock is reset to the default
+  // which is not the same we configure in cubeMx, so we do it as done
+  // during the init, by calling SystemClock_Config().
+  SystemClock_Config();
+  HAL_ResumeTick();
+
+  // Required otherwise the audio wont work after wakeup
+  MX_I2S3_Init();
+
+  init_codec_and_play();
 }
 
+
+//---Command3_changefreq---
+//-------------------------
+void change_freq(void)
+{
+  // Cycle SLOW -> MEDIUM -> FAST -> SLOW
+  if (current_pwm_freq == PWM_FREQ_SLOW)
+  {
+    current_pwm_freq = PWM_FREQ_MEDIUM;
+    SineFreq = MEDIUM_SIN_FREQ;
+    CDC_Transmit_FS((uint8_t*)"Freq: medium\r\n", 14);
+  }
+  else if (current_pwm_freq == PWM_FREQ_MEDIUM)
+  {
+    current_pwm_freq = PWM_FREQ_FAST;
+    SineFreq = FAST_SIN_FREQ;
+    CDC_Transmit_FS((uint8_t*)"Freq: fast\r\n", 12);
+  }
+  else
+  {
+    current_pwm_freq = PWM_FREQ_SLOW;
+    SineFreq = SLOW_SIN_FREQ;
+
+    CDC_Transmit_FS((uint8_t*)"Freq: slow\r\n", 12);
+  }
+  // Re-apply PWM settings (update ON/OFF ticks for TIM10)
+  pwm_apply_settings();
+  build_sine_buffer(SineFreq);
+}
+
+
+//---Command4_changedut---
+//------------------------
+void change_duty(void)
+{
+  // Cycle 25% -> 50% -> 75% -> 25%
+  if (current_pwm_duty == PWM_DUTY_25)
+  {
+    current_pwm_duty = PWM_DUTY_50;
+    CDC_Transmit_FS((uint8_t*)"Duty: 50%\r\n", 11);
+  }
+  else if (current_pwm_duty == PWM_DUTY_50)
+  {
+    current_pwm_duty = PWM_DUTY_75;
+    CDC_Transmit_FS((uint8_t*)"Duty: 75%\r\n", 11);
+  }
+  else
+  {
+    current_pwm_duty = PWM_DUTY_25;
+    CDC_Transmit_FS((uint8_t*)"Duty: 25%\r\n", 11);
+  }
+  pwm_apply_settings();
+}
+
+
+//---Command5_pwmman---
+//---------------------
 void cmd_pwmman(void)
 {
   // Arm manual PWM measurement.
@@ -858,6 +833,63 @@ void cmd_pwmman(void)
   CDC_Transmit_FS((uint8_t*)"pwmman: ready. Press and hold USER button.\r\n",44);
 }
 
+
+//---Command6_ledpwm---
+//---------------------
+void cmd_led_pwm(void)
+{
+  led_pwm_mode = 1;          // LED follows PWM
+  // Restart PWM engine so it takes control immediately
+  pwm_apply_settings();
+
+  CDC_Transmit_FS((uint8_t*)"LED mode: PWM\r\n", 15);
+}
+
+
+//---Command7_ledman---
+//---------------------
+void cmd_led_man(void)
+{
+  led_pwm_mode = 0;          // Manual control
+
+  // Apply manual state to LED immediately
+  if (led_manual_state)
+    BSP_LED_On(LED_BLINK);
+  else
+    BSP_LED_Off(LED_BLINK);
+
+  CDC_Transmit_FS((uint8_t*)"LED mode: MANUAL\r\n", 18);
+}
+
+
+//---Command8_ledon---
+//--------------------
+void cmd_led_on(void)
+{
+  led_manual_state = 1;
+  if (!led_pwm_mode)
+  {
+    BSP_LED_On(LED_BLINK);
+  }
+  CDC_Transmit_FS((uint8_t*)"LED: ON\r\n", 9);
+}
+
+
+//---Command9_ledoff---
+//---------------------
+void cmd_led_off(void)
+{
+  led_manual_state = 0;
+  if (!led_pwm_mode)
+  {
+    BSP_LED_Off(LED_BLINK);
+  }
+  CDC_Transmit_FS((uint8_t*)"LED: OFF\r\n", 10);
+}
+
+
+//---Command10_accon---
+//---------------------
 void cmd_acc_on(void)
 {
   accel_enabled = 1;
@@ -867,10 +899,12 @@ void cmd_acc_on(void)
   CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
 }
 
+
+//---Command11_accoff---
+//----------------------
 void cmd_acc_off(void)
 {
   accel_enabled = 0;
-
   // Turn off LEDs
   BSP_LED_Off(LED_ACC_X);
   BSP_LED_Off(LED_ACC_Y);
@@ -881,11 +915,13 @@ void cmd_acc_off(void)
   {
     HAL_TIM_Base_Stop_IT(&htim11);
   }
-
   const char *msg = "Accelerometer OFF\r\n";
   CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
 }
 
+
+//---Command12_mute---
+//--------------------
 void cmd_mute(void)
 {
   int status = cs43l22_mute();
@@ -901,6 +937,9 @@ void cmd_mute(void)
   }
 }
 
+
+//---Command13_unmute---
+//----------------------
 void cmd_unmute(void)
 {
   int status = cs43l22_unmute();
@@ -915,6 +954,8 @@ void cmd_unmute(void)
     CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
   }
 }
+
+//----------------------------------------------------------------
 
 /* USER CODE END 4 */
 

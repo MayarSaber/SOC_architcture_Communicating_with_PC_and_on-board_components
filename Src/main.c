@@ -51,6 +51,7 @@
 
 // macros to define the sine signal
 #define FAST_SIN_FREQ 1000
+#define MEDIUM_SIN_FREQ 750   
 #define SLOW_SIN_FREQ 500
 
 #define SAMPLING_RATE 48000
@@ -105,7 +106,6 @@ static uint8_t line_ready_buffer[LINE_BUFFER_SIZE]; // Stable buffer for main
 
 // Audio buffer
 int16_t buffer_audio[2 * AUDIO_BUFFER_LENGTH];
-
 
 // ---------- LED BLINK PWM state ----------
 // 3 possible PWM frequencies (slow/medium/fast) expressed as total TIM10 ticks
@@ -163,6 +163,8 @@ static int16_t accel_xyz[3] = {0, 0, 0};
 // To avoid spamming USB: print every N samples (e.g. every 100 ms)
 static uint8_t accel_print_div = 0;   // counts TIM11 ticks
 
+static uint32_t SineFreq = PWM_FREQ_SLOW;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -188,11 +190,13 @@ void cmd_led_on(void);
 void cmd_led_off(void);
 void cmd_acc_on(void);
 void cmd_acc_off(void);
+void cmd_mute(void);
+void cmd_unmute(void);
+void cmd_pwmman(void);
 
 // Helper functions
 void init_codec_and_play();
-
-void cmd_pwmman(void);
+static void build_sine_buffer(uint32_t freq_hz);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -268,6 +272,9 @@ int main(void)
   // Start with accelerometer disabled; user will enable with "accon"
   accel_enabled = 0;
 
+  // Initialize audio codec and start playback of a sine wave
+  init_codec_and_play();
+
 
   /* USER CODE END 2 */
 
@@ -315,21 +322,25 @@ int main(void)
     if (duration_ms < 400)
     {
       new_freq = PWM_FREQ_FAST;
+      SineFreq = FAST_SIN_FREQ;
       CDC_Transmit_FS((uint8_t*)"pwmman: FAST freq\r\n", 19);
     }
     else if (duration_ms < 1000)
     {
       new_freq = PWM_FREQ_MEDIUM;
+      SineFreq = MEDIUM_SIN_FREQ;
       CDC_Transmit_FS((uint8_t*)"pwmman: MEDIUM freq\r\n", 21);
     }
     else
     {
       new_freq = PWM_FREQ_SLOW;
+      SineFreq = SLOW_SIN_FREQ;
       CDC_Transmit_FS((uint8_t*)"pwmman: SLOW freq\r\n", 19);
     }
 
     current_pwm_freq = new_freq;
     pwm_apply_settings();  // recompute ON/OFF ticks, restart PWM
+    build_sine_buffer(SineFreq);
 
     // Print measured time
     /*
@@ -493,18 +504,31 @@ void handle_new_line()
   }
   else if (memcmp(line_ready_buffer, COMMAND_MUTE, sizeof(COMMAND_MUTE)) == 0)
   {
-    //To be done
-    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17);
+    cmd_mute();
   }
   else if (memcmp(line_ready_buffer, COMMAND_UNMUTE, sizeof(COMMAND_UNMUTE)) == 0)
   {
-    //To be done
-    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17); 
+    cmd_unmute(); 
   }
   else
   {
     // If we receive an unknown command, we send an error message back to the PC
     CDC_Transmit_FS((uint8_t*)"Unknown command\r\n", 17);
+  }
+}
+
+static void build_sine_buffer(uint32_t freq_hz)
+{
+  for (int i = 0; i < AUDIO_BUFFER_LENGTH; i++)
+  {
+    // x[n] = A * sin(2*pi*f*n/Fs)
+    float sample_f =
+        10000.0f * sinf(2.0f * 3.14159265f * (float)freq_hz * (float)i / (float)SAMPLING_RATE);
+
+    int16_t sample = (int16_t)sample_f;
+
+    buffer_audio[2 * i]     = sample; // Left
+    buffer_audio[2 * i + 1] = sample; // Right
   }
 }
 
@@ -561,21 +585,26 @@ void change_freq(void)
   if (current_pwm_freq == PWM_FREQ_SLOW)
   {
     current_pwm_freq = PWM_FREQ_MEDIUM;
+    SineFreq = MEDIUM_SIN_FREQ;
     CDC_Transmit_FS((uint8_t*)"Freq: medium\r\n", 14);
   }
   else if (current_pwm_freq == PWM_FREQ_MEDIUM)
   {
     current_pwm_freq = PWM_FREQ_FAST;
+    SineFreq = FAST_SIN_FREQ;
     CDC_Transmit_FS((uint8_t*)"Freq: fast\r\n", 12);
   }
   else
   {
     current_pwm_freq = PWM_FREQ_SLOW;
+    SineFreq = SLOW_SIN_FREQ;
+
     CDC_Transmit_FS((uint8_t*)"Freq: slow\r\n", 12);
   }
 
   // Re-apply PWM settings (update ON/OFF ticks for TIM10)
   pwm_apply_settings();
+  build_sine_buffer(SineFreq);
 }
 
 void change_duty(void)
@@ -855,6 +884,36 @@ void cmd_acc_off(void)
 
   const char *msg = "Accelerometer OFF\r\n";
   CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
+}
+
+void cmd_mute(void)
+{
+  int status = cs43l22_mute();
+  if (!status)
+  {
+    const char *msg = "Audio muted\r\n";
+    CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
+  }
+  else
+  {
+    const char *msg = "Audio mute error\r\n";
+    CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
+  }
+}
+
+void cmd_unmute(void)
+{
+  int status = cs43l22_unmute();
+  if (!status)
+  {
+    const char *msg = "Audio unmuted\r\n";
+    CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
+  }
+  else
+  {
+    const char *msg = "Audio unmute error\r\n";
+    CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
+  }
 }
 
 /* USER CODE END 4 */

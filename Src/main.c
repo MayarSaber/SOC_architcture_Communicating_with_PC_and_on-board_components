@@ -186,6 +186,7 @@ static void pwm_apply_settings(void);
 
 // Commands
 void go_to_stop();
+void go_to_standby();
 void change_freq(void);
 void change_duty(void);
 void cmd_led_pwm(void);
@@ -399,7 +400,7 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-//------------------------------------------callback functions------------------------------------------
+//------------------------------------------------callback functions------------------------------------------------
 // All of this is used to manage commands from serial interface
 static uint8_t line_buffer[LINE_BUFFER_SIZE];
 static uint32_t line_len = 0;
@@ -487,7 +488,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 }
 
 
-//------------------------------------------handler functions------------------------------------------
+//------------------------------------------------handler functions------------------------------------------------
 /**
 * @brief  Handle possible new command
 * @retval None
@@ -500,8 +501,7 @@ void handle_new_line()
   }
   else if (memcmp(line_ready_buffer, COMMAND_STAND_BY, sizeof(COMMAND_STAND_BY)) == 0)
   {
-    //To be done
-    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17);
+    go_to_standby();
   }
   else if (memcmp(line_ready_buffer, COMMAND_CHANGE_FREQ, sizeof(COMMAND_CHANGE_FREQ)) == 0)
   {
@@ -663,7 +663,7 @@ void handle_timer11(void)
 }
 
 
-//------------------------------------------helper functions------------------------------------------
+//------------------------------------------------helper functions------------------------------------------------
 static void build_sine_buffer(uint32_t freq_hz)
 {
   for (int i = 0; i < AUDIO_BUFFER_LENGTH; i++)
@@ -729,7 +729,7 @@ static void pwm_apply_settings(void)
 }
 
 
-//------------------------------------------Commands------------------------------------------
+//----------------------------------------------------Commands----------------------------------------------------
 //---Command1_stop---
 //-------------------
 /**
@@ -738,12 +738,26 @@ static void pwm_apply_settings(void)
 */
 void go_to_stop()
 {
-  // TODO: Make sure all user LEDS are off
+   // Turn off all user LEDs to avoid random light/noise in stop mode
+  BSP_LED_Off(LED3);
+  BSP_LED_Off(LED4);
+  BSP_LED_Off(LED5);
+  BSP_LED_Off(LED6);
+
+  // If you have accel_enabled / pwmman, they need to be disabled:
+  accel_enabled = 0;
+  pwmman_armed = 0;
+  pwmman_measuring = 0;
+
   // To avoid noise during stop mode
   cs43l22_stop();
 
   // Required otherwise the audio wont work after wakeup
   HAL_I2S_DeInit(&hi2s3);
+
+  // stop timers 10 and 11
+  HAL_TIM_Base_Stop_IT(&htim10);
+  HAL_TIM_Base_Stop_IT(&htim11);
 
   // We disable the systick interrupt before going to stop (1ms tick)
   // Otherwise we would be woken up every 1ms
@@ -762,6 +776,41 @@ void go_to_stop()
   MX_I2S3_Init();
 
   init_codec_and_play();
+}
+
+//---Command2_standby---
+//-------------------
+/**
+  * @brief Go to standby mode (deepest low power)
+  * @note  Waking up from standby is like a fresh reset.
+  *        Use the RESET button on the board.
+  */
+void go_to_standby(void)
+{
+  // Turn off user LEDs
+  BSP_LED_Off(LED3);
+  BSP_LED_Off(LED4);
+  BSP_LED_Off(LED5);
+  BSP_LED_Off(LED6);
+
+  // Stop audio & deinit I2S
+  cs43l22_stop();
+  HAL_I2S_DeInit(&hi2s3);
+
+  // Stop timers 
+  HAL_TIM_Base_Stop_IT(&htim10);
+  HAL_TIM_Base_Stop_IT(&htim11);
+
+  // Suspend SysTick so it won't generate interrupts
+  HAL_SuspendTick();
+
+  // Clear Wakeup flag (good practice before entering standby)
+  __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
+
+  // Enter STANDBY mode
+  HAL_PWR_EnterSTANDBYMode();
+
+  // Code NEVER returns here. After reset/wakeup, the MCU starts again from main().
 }
 
 
@@ -955,7 +1004,7 @@ void cmd_unmute(void)
   }
 }
 
-//----------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------
 
 /* USER CODE END 4 */
 

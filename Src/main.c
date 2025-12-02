@@ -155,6 +155,14 @@ static volatile uint8_t pwmman_done = 0;
 static volatile uint32_t button_ticks_10ms = 0;
 // last measured duration in ms (for printing / mapping in main)
 static volatile uint32_t pwmman_last_duration_ms = 0;
+
+// --------- Accelerometer state ---------
+static volatile uint8_t accel_enabled = 0;  // 1 when accon, 0 when accoff
+// Last read accelerometer values (mg)
+static int16_t accel_xyz[3] = {0, 0, 0};
+// To avoid spamming USB: print every N samples (e.g. every 100 ms)
+static uint8_t accel_print_div = 0;   // counts TIM11 ticks
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -178,6 +186,8 @@ void cmd_led_pwm(void);
 void cmd_led_man(void);
 void cmd_led_on(void);
 void cmd_led_off(void);
+void cmd_acc_on(void);
+void cmd_acc_off(void);
 
 // Helper functions
 void init_codec_and_play();
@@ -249,6 +259,15 @@ int main(void)
   HAL_TIM_Base_Start_IT(&htim10);
   pwm_apply_settings();
 
+  // Initialize accelerometer once at startup
+  if (BSP_ACCELERO_Init() != ACCELERO_OK)
+  {
+     CDC_Transmit_FS((uint8_t*)"Accel init error\r\n", strlen("Accel init error\r\n"));
+  }
+
+  // Start with accelerometer disabled; user will enable with "accon"
+  accel_enabled = 0;
+
 
   /* USER CODE END 2 */
 
@@ -313,9 +332,11 @@ int main(void)
     pwm_apply_settings();  // recompute ON/OFF ticks, restart PWM
 
     // Print measured time
+    /*
     char msg[40];
     int len = snprintf(msg, sizeof(msg),"press = %lu ms\r\n", (unsigned long)duration_ms);
     CDC_Transmit_FS((uint8_t*)msg, len);
+    */
     }
 
     /* USER CODE END WHILE */
@@ -425,11 +446,6 @@ void CDC_ReceiveCallBack(uint8_t *buf, uint32_t len)
 */
 void handle_new_line()
 {
-  /*if (memcmp(line_ready_buffer, COMMAND_CHANGE_FREQ, sizeof(COMMAND_CHANGE_FREQ)) == 0)
-  {
-    change_freq();
-  }*/
-
   if (memcmp(line_ready_buffer, COMMAND_STOP, sizeof(COMMAND_STOP)) == 0)
   {
     go_to_stop();
@@ -449,7 +465,7 @@ void handle_new_line()
   }
   else if (memcmp(line_ready_buffer, COMMAND_PWM_MAN, sizeof(COMMAND_PWM_MAN)) == 0)
   {
-  cmd_pwmman();
+    cmd_pwmman();
   }
   else if (memcmp(line_ready_buffer, COMMAND_LED_PWM, sizeof(COMMAND_LED_PWM)) == 0)
   {
@@ -469,13 +485,11 @@ void handle_new_line()
   }
   else if (memcmp(line_ready_buffer, COMMAND_ACC_ON, sizeof(COMMAND_ACC_ON)) == 0)
   {
-    //To be done
-    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17);
+    cmd_acc_on();
   }
   else if (memcmp(line_ready_buffer, COMMAND_ACC_OFF, sizeof(COMMAND_ACC_OFF)) == 0)
   {
-    //To be done
-    CDC_Transmit_FS((uint8_t*)"not implemented\r\n", 17); 
+    cmd_acc_off(); 
   }
   else if (memcmp(line_ready_buffer, COMMAND_MUTE, sizeof(COMMAND_MUTE)) == 0)
   {
@@ -690,7 +704,11 @@ void handle_timer11(void)
     {
       // Released -> stop timing
       pwmman_measuring = 0;
+      // Stop TIM11 only if accelerometer is NOT enabled
+      if (!accel_enabled)
+      {
       HAL_TIM_Base_Stop_IT(&htim11);
+      }
 
       uint32_t duration_ms = button_ticks_10ms * 10;  // 10 ms per tick
       pwmman_last_duration_ms = duration_ms;
@@ -698,7 +716,52 @@ void handle_timer11(void)
     }
   }
 
-  // Later we'll also put accelerometer logic here (accon/accoff)
+  // -------- Accelerometer reading --------
+  if (accel_enabled)
+  {
+    // Read X, Y, Z into accel_xyz[]
+    BSP_ACCELERO_GetXYZ(accel_xyz);
+
+    int16_t x = accel_xyz[0];
+    int16_t y = accel_xyz[1];
+    int16_t z = accel_xyz[2];
+
+    // Compute absolute values
+    int32_t ax = (x >= 0) ? x : -x;
+    int32_t ay = (y >= 0) ? y : -y;
+    int32_t az = (z >= 0) ? z : -z;
+
+    if (ax >= ay && ax >= az)
+    {
+      BSP_LED_On(LED_ACC_X);
+      BSP_LED_Off(LED_ACC_Y);
+      BSP_LED_Off(LED_ACC_Z);
+    }
+    else if (ay >= ax && ay >= az)
+    {
+      BSP_LED_Off(LED_ACC_X);
+      BSP_LED_On(LED_ACC_Y);
+      BSP_LED_Off(LED_ACC_Z);
+    }
+    else if (az >= ax && az >= ay)
+    {
+      BSP_LED_Off(LED_ACC_X);
+      BSP_LED_Off(LED_ACC_Y);
+      BSP_LED_On(LED_ACC_Z);
+    }
+
+    // Print every ~100 ms
+    accel_print_div++;
+    if (accel_print_div >= 100)
+    {
+      accel_print_div = 0;
+      char msg[64];
+      int len = snprintf(msg, sizeof(msg),
+                         "ACC X=%6d Y=%6d Z=%6d\r\n",
+                         (int)x, (int)y, (int)z);
+      CDC_Transmit_FS((uint8_t*)msg, len);
+    }
+  }
 }
 
 // Recompute ON/OFF durations in timer ticks based on current freq & duty
@@ -736,8 +799,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == KEY_BUTTON_PIN)
   {
-    //For verifying
-    BSP_LED_Toggle(LED4);
     // Check if button is actually pressed (line high)
     GPIO_PinState state = HAL_GPIO_ReadPin(KEY_BUTTON_GPIO_PORT, KEY_BUTTON_PIN);
 
@@ -766,6 +827,34 @@ void cmd_pwmman(void)
   pwmman_last_duration_ms = 0;
 
   CDC_Transmit_FS((uint8_t*)"pwmman: ready. Press and hold USER button.\r\n",44);
+}
+
+void cmd_acc_on(void)
+{
+  accel_enabled = 1;
+  // Making sure TIM11 is running for 10 ms ticks
+  HAL_TIM_Base_Start_IT(&htim11);
+  const char *msg = "Accelerometer ON\r\n";
+  CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
+}
+
+void cmd_acc_off(void)
+{
+  accel_enabled = 0;
+
+  // Turn off LEDs
+  BSP_LED_Off(LED_ACC_X);
+  BSP_LED_Off(LED_ACC_Y);
+  BSP_LED_Off(LED_ACC_Z);
+
+  // If button-based pwmman is NOT currently measuring, we can stop TIM11
+  if (!pwmman_measuring)
+  {
+    HAL_TIM_Base_Stop_IT(&htim11);
+  }
+
+  const char *msg = "Accelerometer OFF\r\n";
+  CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
 }
 
 /* USER CODE END 4 */

@@ -23,6 +23,7 @@
 #include "i2s.h"
 #include "spi.h"
 #include "usb_device.h"
+#include "usbd_cdc_if.h"
 #include "gpio.h"
 #include "tim.h"
 
@@ -183,6 +184,7 @@ void init_codec_and_play();
 static void build_sine_buffer(uint32_t freq_hz);
 static void pwm_update_intervals(void);
 static void pwm_apply_settings(void);
+static void usb_wait_for_tx_idle(void);
 
 // Commands
 void go_to_stop();
@@ -203,7 +205,7 @@ void cmd_pwmman(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+extern USBD_HandleTypeDef hUsbDeviceFS;
 /* USER CODE END 0 */
 
 /**
@@ -729,6 +731,29 @@ static void pwm_apply_settings(void)
 }
 
 
+static void usb_wait_for_tx_idle(void)
+{
+  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
+
+  if (hcdc == NULL)
+  {
+    // USB not initialized or not ready; nothing to wait for
+    return;
+  }
+
+  uint32_t start = HAL_GetTick();
+
+  // Wait until TxState becomes 0, but with a small timeout to avoid getting stuck
+  while (hcdc->TxState != 0)
+  {
+    if ((HAL_GetTick() - start) > 10) // ~10 ms timeout
+    {
+      break;
+    }
+  }
+}
+
+
 //----------------------------------------------------Commands----------------------------------------------------
 //---Command1_stop---
 //-------------------
@@ -744,6 +769,10 @@ void go_to_stop()
   BSP_LED_Off(LED5);
   BSP_LED_Off(LED6);
 
+  // First: mute the codec (soft ramp)
+  cs43l22_mute();
+  HAL_Delay(50);   // ~50 ms gives time for ramp-down --> To reduce the knocking sound
+
   // If you have accel_enabled / pwmman, they need to be disabled:
   accel_enabled = 0;
   pwmman_armed = 0;
@@ -754,6 +783,9 @@ void go_to_stop()
 
   // Required otherwise the audio wont work after wakeup
   HAL_I2S_DeInit(&hi2s3);
+
+  // wait for any ongoing USB TX to finish to avoid the stuck of the terminal
+  usb_wait_for_tx_idle();
 
   // stop timers 10 and 11
   HAL_TIM_Base_Stop_IT(&htim10);

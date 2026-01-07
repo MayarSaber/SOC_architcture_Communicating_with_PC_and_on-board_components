@@ -316,7 +316,7 @@ int main(void)
 
     if (pwmman_done)
     {
-    pwmman_done  = 0;
+    pwmman_done  = 0;    //The flag that indicates that the calculation of the pwm manually is done
     pwmman_armed = 0;   // done with this pwmman round
 
     uint32_t duration_ms = pwmman_last_duration_ms;
@@ -466,7 +466,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
 }
 
-
+/*
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == KEY_BUTTON_PIN)
@@ -477,17 +477,67 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     // We only care about the NEW press, and only if pwmman was armed
     if (state == GPIO_PIN_SET && pwmman_armed && !pwmman_measuring)
     {
-      pwmman_measuring  = 1;
-      button_ticks_10ms = 0;
+      pwmman_measuring  = 1; //a flag to indicate that the timer started measuring the press time
+      button_ticks_10ms = 0; //a flag to add 10msec with each expiration of the timer11
 
       // Start TIM11 as 10 ms tick, but DO NOT print here
       __HAL_TIM_SET_COUNTER(&htim11, 0);
       HAL_TIM_Base_Start_IT(&htim11);
     }
+    else if (!led_pwm_mode)
+    {
+      // Toggle logical state
+      led_manual_state = !led_manual_state;
+
+      // Apply to the actual LED
+      if (led_manual_state)
+      {
+        BSP_LED_On(LED_BLINK);
+      }
+      else
+      {
+        BSP_LED_Off(LED_BLINK);
+      }
+    }
 
     // We don't handle release here, we detect it in handle_timer11()
   }
 }
+*/
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == KEY_BUTTON_PIN)
+  {
+    GPIO_PinState state = HAL_GPIO_ReadPin(KEY_BUTTON_GPIO_PORT, KEY_BUTTON_PIN);
+
+    if (state == GPIO_PIN_SET)
+    {
+      // 1) First: handle pwmman (has priority)
+      if (pwmman_armed && !pwmman_measuring)
+      {
+        pwmman_measuring  = 1;
+        button_ticks_10ms = 0;
+
+        __HAL_TIM_SET_COUNTER(&htim11, 0);
+        HAL_TIM_Base_Start_IT(&htim11);
+      }
+      // 2) Else: manual LED toggle when in manual mode
+      else if (!led_pwm_mode)
+      {
+        led_manual_state = !led_manual_state;
+
+        if (led_manual_state)
+          BSP_LED_On(LED_BLINK);
+        else
+          BSP_LED_Off(LED_BLINK);
+      }
+    }
+
+    // Release (state == RESET) is ignored here; pwmman release is handled in handle_timer11()
+  }
+}
+
 
 
 //------------------------------------------------handler functions------------------------------------------------
@@ -582,8 +632,7 @@ void handle_timer10(void)
   }
   else
   {
-    // Manual mode: for now do nothing on TIM10 interrupts.
-    // Later we can even stop TIM10 completely when in manual mode.
+    //Do nothing
   }
 }
 
@@ -701,8 +750,8 @@ void init_codec_and_play()
 // Recompute ON/OFF durations in timer ticks based on current freq & duty
 static void pwm_update_intervals(void)
 {
-  uint32_t total = pwm_total_ticks[current_pwm_freq];
-  uint32_t duty  = pwm_duty_percent[current_pwm_duty];
+  uint32_t total = pwm_total_ticks[current_pwm_freq];  //the frequency defines the total number of ticks
+  uint32_t duty  = pwm_duty_percent[current_pwm_duty]; //the duty cycle defines the number of on ticks and the off ticks
 
   pwm_on_ticks  = (total * duty) / 100;
   pwm_off_ticks = total - pwm_on_ticks;
@@ -720,10 +769,10 @@ static void pwm_apply_settings(void)
   pwm_led_is_on = 0;
   BSP_LED_Off(LED_BLINK);
 
-  pwm_update_intervals();
+  pwm_update_intervals(); //Calculate the current on and off times
 
   // First interval: OFF time, so next interrupt will switch it ON
-  __HAL_TIM_SET_AUTORELOAD(&htim10, pwm_off_ticks);
+  __HAL_TIM_SET_AUTORELOAD(&htim10, pwm_off_ticks); 
   __HAL_TIM_SET_COUNTER(&htim10, 0);
 
   // Make sure timer is running
@@ -905,11 +954,11 @@ void change_duty(void)
 void cmd_pwmman(void)
 {
   // Arm manual PWM measurement.
-  pwmman_armed           = 1;
-  pwmman_measuring       = 0;
-  pwmman_done            = 0;
-  button_ticks_10ms      = 0;
-  pwmman_last_duration_ms = 0;
+  pwmman_armed           = 1;  //a flag to indicate that we are using the manual pwm now
+  pwmman_measuring       = 0;  //a flag to indicate that timer11 started measuring the press time
+  pwmman_done            = 0;  //a flag to indicate that the manual pwm measurement is done
+  button_ticks_10ms      = 0;  //a flag to add 10msec with each expiration of the timer11
+  pwmman_last_duration_ms = 0; //a flag to indicate the duration of the pressed button at the end
 
   CDC_Transmit_FS((uint8_t*)"pwmman: ready. Press and hold USER button.\r\n",44);
 }
@@ -973,7 +1022,7 @@ void cmd_led_off(void)
 //---------------------
 void cmd_acc_on(void)
 {
-  accel_enabled = 1;
+  accel_enabled = 1;  //A flag used to enable the accelerometer
   // Making sure TIM11 is running for 10 ms ticks
   HAL_TIM_Base_Start_IT(&htim11);
   const char *msg = "Accelerometer ON\r\n";
